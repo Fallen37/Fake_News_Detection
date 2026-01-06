@@ -89,41 +89,140 @@ class FakeNewsDetectionSystem:
     
     def _mock_prediction(self, features: np.ndarray, articles: List[Dict]) -> Dict:
         """
-        Mock prediction for demonstration (replace with trained model)
+        Comprehensive credibility prediction using multiple features.
+        This replaces the simple heuristic with a weighted multi-factor analysis.
         """
-        # Simple heuristic for demonstration
-        sentiment_trend = np.diff([a['sentiment_score'] for a in articles])
-        certainty_trend = np.diff([a['certainty_level'] for a in articles])
+        # Run comprehensive analysis
+        comprehensive = self.analyzer.comprehensive_analysis(articles)
         
-        # Real news typically shows:
-        # 1. Increasing certainty over time
-        # 2. Sentiment stabilization
-        # 3. Consistent narrative
+        if 'error' in comprehensive:
+            return {
+                'credibility_score': 0.5,
+                'verdict': 'INSUFFICIENT DATA',
+                'fake_probability': 0.5,
+                'real_probability': 0.5
+            }
         
-        certainty_improvement = np.mean(certainty_trend) if len(certainty_trend) > 0 else 0
-        sentiment_stability = 1 - np.std([a['sentiment_score'] for a in articles])
+        features_data = comprehensive['features']
         
-        # Calculate credibility score
+        # ==================== SCORING COMPONENTS ====================
+        
+        # 1. SOURCE CREDIBILITY (Weight: 30%)
+        # - Number of unique sources
+        # - Publisher credibility ratings
+        # - Source diversity
+        source_div = features_data.get('source_diversity', {})
+        unique_sources = source_div.get('unique_sources', 0)
+        avg_pub_credibility = source_div.get('avg_credibility', 0.5)
+        
+        # More sources = higher score (max out at 5 sources)
+        source_count_score = min(1.0, unique_sources / 5)
+        source_score = (0.5 * source_count_score + 0.5 * avg_pub_credibility)
+        
+        # 2. CONTENT QUALITY (Weight: 25%)
+        # - Low clickbait score is good
+        # - Moderate complexity is good (not too simple, not too complex)
+        # - Low sensationalism is good
+        clickbait = features_data.get('clickbait', {}).get('avg_score', 0.5)
+        complexity = features_data.get('lexical_complexity', {}).get('avg_score', 0.5)
+        sensationalism = features_data.get('sentiment_intensity', {}).get('avg_score', 0.5)
+        
+        # Invert clickbait and sensationalism (lower is better)
+        clickbait_score = 1 - clickbait
+        sensationalism_score = 1 - sensationalism
+        
+        # Complexity: optimal around 0.5, penalize extremes
+        complexity_score = 1 - abs(complexity - 0.5) * 2
+        
+        content_score = (0.4 * clickbait_score + 0.3 * sensationalism_score + 0.3 * complexity_score)
+        
+        # 3. CONSISTENCY (Weight: 20%)
+        # - Stance similarity between sources
+        # - Narrative consistency over time
+        # - No major fact drift
+        stance = features_data.get('stance_similarity', {})
+        stance_score = stance.get('stance_similarity', 0.5)
+        
+        drift = features_data.get('narrative_drift', {})
+        drift_score = 1 - drift.get('drift_score', 0)  # Lower drift is better
+        
+        consistency_score = (0.5 * stance_score + 0.5 * drift_score)
+        
+        # 4. TEMPORAL PATTERNS (Weight: 15%)
+        # - Normal spread pattern (not suspicious spike)
+        # - Presence of corrections/updates (good sign)
+        time_gaps = features_data.get('time_gaps', {})
+        is_suspicious_spread = time_gaps.get('is_suspicious', False)
+        spread_score = 0.3 if is_suspicious_spread else 0.8
+        
+        corrections = features_data.get('corrections', {})
+        correction_boost = corrections.get('credibility_boost', 0)
+        
+        temporal_score = spread_score + correction_boost
+        
+        # 5. SOURCE INDEPENDENCE (Weight: 10%)
+        # - Low redundancy (not all from same wire service)
+        redundancy = features_data.get('source_redundancy', {})
+        redundancy_ratio = redundancy.get('redundancy_score', 0)
+        independence_score = 1 - redundancy_ratio
+        
+        # ==================== FINAL CALCULATION ====================
+        
+        # Weighted combination
         credibility_score = (
-            0.4 * max(0, certainty_improvement) +  # Certainty should improve
-            0.3 * max(0, sentiment_stability) +    # Sentiment should stabilize
-            0.3 * 0.8  # Base credibility (mock)
+            0.30 * source_score +
+            0.25 * content_score +
+            0.20 * consistency_score +
+            0.15 * temporal_score +
+            0.10 * independence_score
         )
         
-        credibility_score = max(0, min(1, credibility_score))
+        # Apply bonuses/penalties
         
-        if credibility_score > 0.7:
+        # Bonus for multiple high-credibility sources
+        if unique_sources >= 3 and avg_pub_credibility >= 0.7:
+            credibility_score += 0.1
+        
+        # Penalty for single source
+        if unique_sources <= 1:
+            credibility_score -= 0.15
+        
+        # Penalty for high clickbait
+        if clickbait > 0.6:
+            credibility_score -= 0.1
+        
+        # Penalty for contradictions
+        if stance.get('has_contradictions', False):
+            credibility_score -= 0.1
+        
+        # Clamp to 0-1 range
+        credibility_score = max(0.05, min(0.95, credibility_score))
+        
+        # Determine verdict
+        if credibility_score >= 0.7:
             verdict = 'LIKELY REAL'
-        elif credibility_score < 0.4:
-            verdict = 'LIKELY FAKE'
-        else:
+        elif credibility_score >= 0.5:
+            verdict = 'PROBABLY REAL'
+        elif credibility_score >= 0.35:
             verdict = 'UNCERTAIN'
+        elif credibility_score >= 0.2:
+            verdict = 'PROBABLY FAKE'
+        else:
+            verdict = 'LIKELY FAKE'
         
         return {
             'credibility_score': credibility_score,
             'verdict': verdict,
             'fake_probability': 1 - credibility_score,
-            'real_probability': credibility_score
+            'real_probability': credibility_score,
+            'score_breakdown': {
+                'source_score': source_score,
+                'content_score': content_score,
+                'consistency_score': consistency_score,
+                'temporal_score': temporal_score,
+                'independence_score': independence_score
+            },
+            'analysis_details': comprehensive
         }
     
     def _calculate_timeline_span(self, articles: List[Dict]) -> float:
@@ -140,36 +239,89 @@ class FakeNewsDetectionSystem:
         
         explanations = []
         
-        # Timeline analysis
-        if len(articles) > 1:
-            certainty_trend = [a['certainty_level'] for a in articles]
-            if certainty_trend[-1] > certainty_trend[0]:
-                explanations.append("✅ Certainty levels increased over time, indicating legitimate investigation")
-            else:
-                explanations.append("⚠️ Certainty levels did not improve, which is unusual for real events")
+        # Get score breakdown if available
+        breakdown = prediction.get('score_breakdown', {})
+        details = prediction.get('analysis_details', {}).get('features', {})
         
-        # Sentiment analysis
-        sentiments = [a['sentiment_score'] for a in articles]
-        if len(sentiments) > 1:
-            if abs(sentiments[-1] - sentiments[0]) < 0.3:
-                explanations.append("✅ Sentiment remained relatively stable across reports")
-            else:
-                explanations.append("⚠️ Large sentiment swings detected across timeline")
+        # Source analysis
+        source_div = details.get('source_diversity', {})
+        unique_sources = source_div.get('unique_sources', 0)
+        avg_cred = source_div.get('avg_credibility', 0)
         
-        # Source diversity
-        sources = set(a['source'] for a in articles)
-        if len(sources) > 1:
-            explanations.append(f"✅ Multiple sources ({len(sources)}) reported on this event")
+        if unique_sources >= 3:
+            explanations.append(f"✅ Multiple independent sources ({unique_sources}) reported on this event")
+        elif unique_sources == 2:
+            explanations.append(f"⚠️ Only 2 sources found - more verification recommended")
+        elif unique_sources == 1:
+            explanations.append(f"❌ Only single source found - high risk of misinformation")
         else:
-            explanations.append("⚠️ Only single source found for this event")
+            explanations.append(f"❌ No credible sources found")
+        
+        if avg_cred >= 0.8:
+            explanations.append(f"✅ Sources are highly credible (avg: {avg_cred:.2f})")
+        elif avg_cred >= 0.6:
+            explanations.append(f"✅ Sources have moderate credibility (avg: {avg_cred:.2f})")
+        elif avg_cred < 0.5:
+            explanations.append(f"⚠️ Sources have low credibility ratings (avg: {avg_cred:.2f})")
+        
+        # Content quality
+        clickbait = details.get('clickbait', {})
+        if clickbait.get('is_clickbait', False):
+            explanations.append(f"⚠️ Clickbait patterns detected in headlines")
+        
+        intensity = details.get('sentiment_intensity', {})
+        if intensity.get('is_sensational', False):
+            explanations.append(f"⚠️ Sensational/emotional language detected")
+        
+        complexity = details.get('lexical_complexity', {})
+        if complexity.get('is_suspicious', False):
+            explanations.append(f"⚠️ Unusually simple language (potential fake news indicator)")
+        
+        # Consistency
+        stance = details.get('stance_similarity', {})
+        if stance.get('has_contradictions', False):
+            explanations.append(f"❌ Contradictions detected between sources")
+        elif stance.get('stance_similarity', 0) > 0.7:
+            explanations.append(f"✅ Sources show consistent reporting")
+        
+        drift = details.get('narrative_drift', {})
+        if not drift.get('is_consistent', True):
+            explanations.append(f"⚠️ Facts appear to drift significantly over time")
+        
+        # Temporal patterns
+        time_gaps = details.get('time_gaps', {})
+        if time_gaps.get('is_suspicious', False):
+            explanations.append(f"⚠️ Suspicious spread pattern (rapid spike)")
+        
+        corrections = details.get('corrections', {})
+        if corrections.get('has_corrections', False):
+            explanations.append(f"✅ Updates/corrections found (sign of responsible journalism)")
+        
+        # Source independence
+        redundancy = details.get('source_redundancy', {})
+        if redundancy.get('is_mostly_wire', False):
+            explanations.append(f"⚠️ Most articles from same wire service (limited independent verification)")
         
         verdict_explanation = {
-            'LIKELY REAL': "The temporal patterns suggest this is likely a legitimate news story.",
-            'LIKELY FAKE': "The temporal patterns raise concerns about the authenticity of this story.",
-            'UNCERTAIN': "The evidence is mixed - more investigation may be needed."
+            'LIKELY REAL': "The evidence strongly suggests this is legitimate news.",
+            'PROBABLY REAL': "The evidence suggests this is likely legitimate, but some caution advised.",
+            'UNCERTAIN': "The evidence is mixed - more investigation recommended.",
+            'PROBABLY FAKE': "Several red flags detected - treat with skepticism.",
+            'LIKELY FAKE': "Multiple indicators suggest this may be misinformation."
         }
         
-        explanation = f"{verdict_explanation[prediction['verdict']]}\n\n" + "\n".join(explanations)
+        verdict = prediction.get('verdict', 'UNCERTAIN')
+        explanation = f"{verdict_explanation.get(verdict, 'Unable to determine.')}\n\n"
+        explanation += "\n".join(explanations)
+        
+        # Add score breakdown
+        if breakdown:
+            explanation += f"\n\n📊 Score Breakdown:\n"
+            explanation += f"  • Source Quality: {breakdown.get('source_score', 0):.2f}\n"
+            explanation += f"  • Content Quality: {breakdown.get('content_score', 0):.2f}\n"
+            explanation += f"  • Consistency: {breakdown.get('consistency_score', 0):.2f}\n"
+            explanation += f"  • Temporal Patterns: {breakdown.get('temporal_score', 0):.2f}\n"
+            explanation += f"  • Source Independence: {breakdown.get('independence_score', 0):.2f}"
         
         return explanation
     

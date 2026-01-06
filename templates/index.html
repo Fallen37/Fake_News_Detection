@@ -364,7 +364,7 @@
                     <ul class="progress-steps" id="progressSteps">
                         <li class="progress-step" id="step1">
                             <span class="step-icon">🔍</span>
-                            <span>Analyzing user input and extracting keywords</span>
+                            <span>Analyzing user input and extracting claim</span>
                             <div class="step-details" id="step1Details"></div>
                         </li>
                         <li class="progress-step" id="step2">
@@ -373,8 +373,8 @@
                             <div class="step-details" id="step2Details"></div>
                         </li>
                         <li class="progress-step" id="step3">
-                            <span class="step-icon">📰</span>
-                            <span>Collecting articles from multiple sources</span>
+                            <span class="step-icon">🧠</span>
+                            <span>Semantic matching - finding related articles</span>
                             <div class="step-details" id="step3Details"></div>
                         </li>
                         <li class="progress-step" id="step4">
@@ -535,11 +535,11 @@
                 document.getElementById('step2Details').textContent = `Searching news databases for: "${userInput}"`;
             }, 800);
 
-            // Step 3: Article collection
+            // Step 3: Semantic matching
             setTimeout(() => {
                 completeStep(2);
                 activateStep(3);
-                document.getElementById('step3Details').textContent = 'Found articles from Reuters, BBC, Associated Press...';
+                document.getElementById('step3Details').textContent = 'Converting claim to embedding vector, matching semantically similar articles...';
             }, 1500);
 
             // Step 4: Temporal analysis
@@ -669,11 +669,30 @@
                     }
                 }
                 
+                // Semantic similarity badge
+                let similarityBadge = '';
+                if (source.semantic_similarity !== null && source.semantic_similarity !== undefined) {
+                    const simScore = (source.semantic_similarity * 100).toFixed(0);
+                    let simColor = '#dc3545'; // red for low
+                    if (source.semantic_similarity >= 0.5) simColor = '#28a745'; // green for high
+                    else if (source.semantic_similarity >= 0.3) simColor = '#ffc107'; // yellow for medium
+                    
+                    similarityBadge = `<span style="background: ${simColor}; color: white; padding: 2px 6px; border-radius: 10px; font-size: 10px; margin-left: 5px;" title="Semantic similarity to your claim">🧠 ${simScore}%</span>`;
+                }
+                
+                // Stance indicator
+                let stanceIndicator = '';
+                if (source.stance === 'supporting') {
+                    stanceIndicator = '<span style="color: #28a745; font-size: 11px;">✓ Supporting</span>';
+                } else if (source.stance === 'contradicting') {
+                    stanceIndicator = '<span style="color: #dc3545; font-size: 11px;">✗ Contradicting</span>';
+                }
+                
                 html += `
-                    <div class="source-item" style="border-left: 4px solid ${categoryColor};">
-                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px;">
+                    <div class="source-item" style="border-left: 4px solid ${categoryColor}; ${!source.is_relevant ? 'opacity: 0.7;' : ''}">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; flex-wrap: wrap; gap: 5px;">
                             <span class="source-timestamp" style="font-weight: bold; color: #333;">
-                                ${source.source}
+                                ${source.source} ${similarityBadge}
                             </span>
                             <span style="background: ${categoryColor}; color: white; padding: 2px 8px; border-radius: 12px; font-size: 11px;">
                                 ${categoryIcon} ${source.source_category || 'General'}
@@ -682,6 +701,7 @@
                         <div style="font-size: 12px; color: #666; margin-bottom: 6px;">
                             📅 ${source.timestamp}
                             ${source.author ? ' | ✍️ ' + source.author : ''}
+                            ${stanceIndicator ? ' | ' + stanceIndicator : ''}
                         </div>
                         <div class="source-title" style="font-size: 15px; font-weight: 600; color: #1a1a1a; margin-bottom: 8px; line-height: 1.4;">
                             ${source.title}

@@ -2,34 +2,105 @@
 """
 Flask web application for RNN-based Fake News Detection
 Uses REAL news APIs to search and verify news articles
+Implements SEMANTIC SEARCH for claim-based verification
 """
 
 from flask import Flask, render_template, request, jsonify
+from flask.json.provider import DefaultJSONProvider
+import json
 import sys
 import os
 import requests
 from datetime import datetime, timedelta
 import re
+import numpy as np
+
+# Custom JSON encoder to handle numpy types
+class CustomJSONProvider(DefaultJSONProvider):
+    def default(self, obj):
+        if isinstance(obj, np.bool_):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return super().default(obj)
 
 sys.path.append('src')
 from main import FakeNewsDetectionSystem
 from data_collector import NewsCollector
 
+# Import semantic search module
+try:
+    from semantic_search import SemanticMatcher, ClaimExtractor, ClaimVerifier, semantic_search_articles
+    SEMANTIC_ENABLED = True
+    print("✅ Semantic search module loaded")
+except ImportError as e:
+    SEMANTIC_ENABLED = False
+    print(f"⚠️ Semantic search not available: {e}")
+    print("   Install with: pip install sentence-transformers spacy")
+
 app = Flask(__name__)
+app.json = CustomJSONProvider(app)  # Use custom JSON provider
 
 # Initialize the detection system
 detection_system = FakeNewsDetectionSystem()
 
-# NewsAPI.org API Key - Free tier allows 100 requests/day
-# Get your free API key at: https://newsapi.org/register
-NEWSAPI_KEY = os.environ.get('NEWSAPI_KEY', 'dea6780346b948d98863aad70b40ac42')
+# NewsAPI.org API Keys - Multiple keys for rotation when rate limited
+# Free tier allows 100 requests/day per key
+NEWSAPI_KEYS = [
+    'dea6780346b948d98863aad70b40ac42',  # Original key
+    '259768ed6e2e48a9a65554cc2c7010cd',  # Backup key 1
+    '6d48c0aa474e41ca96bdc0d4165618ff',  # Backup key 2
+]
+
+class APIKeyManager:
+    """Manages multiple API keys with automatic rotation on rate limit"""
+    
+    def __init__(self, keys):
+        self.keys = keys
+        self.current_index = 0
+        self.exhausted_keys = set()
+    
+    def get_current_key(self):
+        """Get the current active API key"""
+        if len(self.exhausted_keys) >= len(self.keys):
+            # All keys exhausted, reset and try again (might work after some time)
+            print("⚠️ All API keys exhausted, resetting...")
+            self.exhausted_keys.clear()
+            self.current_index = 0
+        return self.keys[self.current_index]
+    
+    def rotate_key(self):
+        """Switch to the next available API key"""
+        self.exhausted_keys.add(self.current_index)
+        
+        # Find next non-exhausted key
+        for i in range(len(self.keys)):
+            next_index = (self.current_index + 1 + i) % len(self.keys)
+            if next_index not in self.exhausted_keys:
+                self.current_index = next_index
+                print(f"🔄 Rotated to API key #{self.current_index + 1}")
+                return True
+        
+        print("❌ All API keys are rate-limited")
+        return False
+    
+    def mark_rate_limited(self):
+        """Mark current key as rate limited and rotate"""
+        print(f"⚠️ API key #{self.current_index + 1} hit rate limit (429)")
+        return self.rotate_key()
+
+# Global API key manager
+api_key_manager = APIKeyManager(NEWSAPI_KEYS)
 
 class RealNewsCollector(NewsCollector):
     """News collector that searches REAL news sources via NewsAPI with diverse source selection"""
     
     def __init__(self):
         super().__init__()
-        self.api_key = NEWSAPI_KEY
         self.base_url = "https://newsapi.org/v2/everything"
         self.top_headlines_url = "https://newsapi.org/v2/top-headlines"
         
@@ -229,8 +300,8 @@ class RealNewsCollector(NewsCollector):
         return unique_articles
     
     def _search_sources(self, query: str, from_date: datetime, to_date: datetime, 
-                        sources: str, category_name: str):
-        """Search specific sources"""
+                        sources: str, category_name: str, retry_count: int = 0):
+        """Search specific sources with API key rotation on rate limit"""
         
         params = {
             'q': query,
@@ -240,7 +311,7 @@ class RealNewsCollector(NewsCollector):
             'sortBy': 'publishedAt',
             'language': 'en',
             'pageSize': 5,
-            'apiKey': self.api_key
+            'apiKey': api_key_manager.get_current_key()
         }
         
         try:
@@ -253,6 +324,13 @@ class RealNewsCollector(NewsCollector):
                     return self._process_api_response(data['articles'], query)
                 else:
                     print(f"  ⚠️ {category_name}: No articles found")
+            elif response.status_code == 429:
+                # Rate limited - try rotating to next key
+                if retry_count < len(NEWSAPI_KEYS) and api_key_manager.mark_rate_limited():
+                    print(f"  🔄 Retrying {category_name} with new API key...")
+                    return self._search_sources(query, from_date, to_date, sources, category_name, retry_count + 1)
+                else:
+                    print(f"  ❌ {category_name}: All API keys rate limited")
             else:
                 print(f"  ❌ {category_name}: API error {response.status_code}")
                 
@@ -261,8 +339,8 @@ class RealNewsCollector(NewsCollector):
         
         return []
     
-    def _search_general(self, query: str, from_date: datetime, to_date: datetime):
-        """General search without source filter"""
+    def _search_general(self, query: str, from_date: datetime, to_date: datetime, retry_count: int = 0):
+        """General search without source filter, with API key rotation"""
         
         params = {
             'q': query,
@@ -271,7 +349,7 @@ class RealNewsCollector(NewsCollector):
             'sortBy': 'relevancy',
             'language': 'en',
             'pageSize': 10,
-            'apiKey': self.api_key
+            'apiKey': api_key_manager.get_current_key()
         }
         
         try:
@@ -282,6 +360,13 @@ class RealNewsCollector(NewsCollector):
                 if data.get('status') == 'ok' and data.get('articles'):
                     print(f"  ✅ General search: Found {len(data['articles'])} articles")
                     return self._process_api_response(data['articles'], query)
+            elif response.status_code == 429:
+                # Rate limited - try rotating to next key
+                if retry_count < len(NEWSAPI_KEYS) and api_key_manager.mark_rate_limited():
+                    print(f"  🔄 Retrying general search with new API key...")
+                    return self._search_general(query, from_date, to_date, retry_count + 1)
+                else:
+                    print(f"  ❌ General search: All API keys rate limited")
                     
         except Exception as e:
             print(f"  ❌ General search error: {str(e)}")
@@ -462,6 +547,69 @@ def analyze_news():
                 'keywords_searched': keywords
             }), 404
         
+        # Step 2.5: SEMANTIC FILTERING - Filter articles by semantic relevance to the claim
+        claim_info = None
+        semantic_stats = None
+        
+        def make_json_serializable(obj):
+            """Convert numpy types and other non-serializable objects to JSON-serializable types"""
+            import numpy as np
+            if isinstance(obj, dict):
+                return {k: make_json_serializable(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [make_json_serializable(item) for item in obj]
+            elif isinstance(obj, (np.bool_, bool)):
+                return bool(obj)
+            elif isinstance(obj, (np.integer, int)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, float)):
+                return float(obj)
+            elif isinstance(obj, np.ndarray):
+                return obj.tolist()
+            else:
+                return obj
+        
+        if SEMANTIC_ENABLED:
+            print(f"🧠 Step 2.5: Applying semantic search to filter relevant articles")
+            try:
+                # Extract claim from user input
+                claim_extractor = ClaimExtractor()
+                claim_info = claim_extractor.extract_claim(user_input)
+                
+                print(f"   Claim type: {claim_info['claim_type']}")
+                print(f"   Extracted claim: '{claim_info['claim']}'")
+                
+                # Filter articles by semantic similarity
+                original_count = len(articles)
+                articles = semantic_search_articles(user_input, articles, min_similarity=0.25)
+                
+                # Count semantically relevant articles
+                relevant_count = sum(1 for a in articles if a.get('is_relevant', False))
+                
+                semantic_stats = {
+                    'original_articles': int(original_count),
+                    'semantically_relevant': int(relevant_count),
+                    'claim_type': str(claim_info['claim_type']),
+                    'extracted_claim': str(claim_info['claim']),
+                    'entities_found': {k: v for k, v in claim_info.get('entities', {}).items() if v}
+                }
+                
+                print(f"   Filtered: {original_count} → {len(articles)} articles ({relevant_count} highly relevant)")
+                
+                # Verify claim against articles
+                verifier = ClaimVerifier()
+                verification = verifier.verify_claim_against_articles(user_input, articles)
+                # Make verification JSON serializable
+                semantic_stats['verification'] = make_json_serializable(verification)
+                
+            except Exception as e:
+                print(f"   ⚠️ Semantic search error: {e}, falling back to keyword search")
+                import traceback
+                traceback.print_exc()
+                semantic_stats = {'error': str(e)}
+        else:
+            print(f"   ℹ️ Semantic search not enabled, using keyword matching only")
+        
         # Check if we got real articles or error responses
         has_real_articles = any(a.get('is_real_article', False) for a in articles)
         
@@ -481,22 +629,38 @@ def analyze_news():
         response = format_analysis_response(results, articles, user_input, has_real_articles)
         
         # Add processing details to response
+        analysis_steps = [
+            f"✅ Extracted {len(keywords)} keywords: {', '.join(keywords)}",
+            f"✅ Searched real news sources via NewsAPI",
+            f"✅ Found {len(articles)} relevant articles",
+        ]
+        
+        # Add semantic search details
+        if semantic_stats and 'error' not in semantic_stats:
+            analysis_steps.append(f"✅ Semantic filtering: {semantic_stats.get('original_articles', 0)} → {len(articles)} articles")
+            analysis_steps.append(f"✅ Claim type: {semantic_stats.get('claim_type', 'unknown')}")
+            if semantic_stats.get('entities_found'):
+                analysis_steps.append(f"✅ Entities detected: {semantic_stats['entities_found']}")
+            if semantic_stats.get('verification'):
+                v = semantic_stats['verification']
+                analysis_steps.append(f"✅ Claim verification: {v.get('verification_status', 'N/A')} ({v.get('supporting_articles', 0)} supporting, {v.get('contradicting_articles', 0)} contradicting)")
+        
+        analysis_steps.extend([
+            f"✅ Sources: {', '.join(set([a['source'] for a in articles]))}",
+            f"✅ Analyzed {results['timeline_span_hours']:.1f} hour timeline",
+            f"✅ RNN analysis completed with {results['credibility_score']:.2f} confidence",
+            f"✅ Generated {response['verdict']} verdict with explanation"
+        ])
+        
         response['processing_details'] = {
             'keywords_extracted': keywords,
             'articles_found': len(articles),
             'real_articles_found': len([a for a in articles if a.get('is_real_article', False)]),
             'sources': list(set([a['source'] for a in articles])),
             'timeline_span': f"{results['timeline_span_hours']:.1f} hours",
-            'search_method': 'NewsAPI (Real News Search)',
-            'analysis_steps': [
-                f"✅ Extracted {len(keywords)} keywords: {', '.join(keywords)}",
-                f"✅ Searched real news sources via NewsAPI",
-                f"✅ Found {len(articles)} relevant articles",
-                f"✅ Sources: {', '.join(set([a['source'] for a in articles]))}",
-                f"✅ Analyzed {results['timeline_span_hours']:.1f} hour timeline",
-                f"✅ RNN analysis completed with {results['credibility_score']:.2f} confidence",
-                f"✅ Generated {response['verdict']} verdict with explanation"
-            ]
+            'search_method': 'Semantic Search + NewsAPI' if SEMANTIC_ENABLED else 'NewsAPI (Keyword Search)',
+            'semantic_search': semantic_stats,
+            'analysis_steps': analysis_steps
         }
         
         return jsonify(response)
@@ -550,15 +714,23 @@ def format_analysis_response(results, articles, user_input, has_real_articles):
     # Format sources timeline with REAL article data
     sources_timeline = []
     for article in articles:
+        # Explicitly convert all values to native Python types
+        sem_sim = article.get('semantic_similarity')
+        if sem_sim is not None:
+            sem_sim = float(sem_sim)
+        
         timeline_entry = {
             'timestamp': article['timestamp'].strftime('%B %d, %Y | %I:%M %p'),
-            'source': article['source'],
-            'source_category': article.get('source_category', 'General'),
-            'title': article['title'],
-            'content_preview': article['content'][:200] + '...' if len(article['content']) > 200 else article['content'],
-            'url': article.get('url', '#'),
-            'author': article.get('author', ''),
-            'is_real': article.get('is_real_article', False)
+            'source': str(article['source']),
+            'source_category': str(article.get('source_category', 'General')),
+            'title': str(article['title']),
+            'content_preview': str(article['content'][:200] + '...' if len(article['content']) > 200 else article['content']),
+            'url': str(article.get('url', '#')),
+            'author': str(article.get('author', '')),
+            'is_real': True if article.get('is_real_article', False) else False,
+            'semantic_similarity': sem_sim,
+            'is_relevant': True if article.get('is_relevant', True) else False,
+            'stance': str(article.get('stance', 'neutral'))
         }
         sources_timeline.append(timeline_entry)
     
@@ -683,13 +855,14 @@ def generate_main_analysis(articles, user_input, verdict, reason, real_count):
         """
 
 if __name__ == '__main__':
-    # Check if API key is configured
-    if NEWSAPI_KEY == 'YOUR_API_KEY_HERE':
-        print("⚠️  WARNING: NewsAPI key not configured!")
+    # Check if API keys are configured
+    if not NEWSAPI_KEYS or NEWSAPI_KEYS[0] == 'YOUR_API_KEY_HERE':
+        print("⚠️  WARNING: NewsAPI keys not configured!")
         print("📝 To use real news search:")
         print("   1. Get a free API key at: https://newsapi.org/register")
-        print("   2. Set environment variable: NEWSAPI_KEY=your_key_here")
-        print("   3. Or edit app.py and replace 'YOUR_API_KEY_HERE' with your key")
+        print("   2. Add your keys to the NEWSAPI_KEYS list in app.py")
         print("")
+    else:
+        print(f"✅ {len(NEWSAPI_KEYS)} NewsAPI keys configured for rotation")
     
     app.run(debug=True, host='0.0.0.0', port=5000)

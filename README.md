@@ -15,12 +15,50 @@ Real news typically shows consistent patterns: initial uncertainty → gradual c
 
 ## 🎯 Key Features
 
+- **Semantic Search** - Understands claims as meaning, not just keywords (powered by sentence-transformers)
 - **Real News Search** - Searches actual news databases (BBC, CNN, Reuters, Times of India, etc.)
+- **Claim Verification** - Compares your claim against multiple sources to verify or refute
 - **Diverse Source Selection** - International, regional, and domestic sources for comprehensive coverage
 - **RNN Temporal Analysis** - LSTM network analyzes how stories evolve over time to detect authenticity patterns
 - **Attention Mechanism** - Focuses on the most relevant temporal features for credibility assessment
 - **Web Interface** - Interactive UI with real-time progress tracking
 - **Source Categorization** - Color-coded badges showing source type (International 🌍, Indian 🇮🇳, Regional 📍, Specialized 💼)
+
+## 🧠 Semantic Search: How It Works
+
+Unlike traditional keyword search, our system uses **semantic understanding**:
+
+### Step 1: Claim Extraction
+When you enter text like "NASA discovered life on Mars", the system:
+- Identifies it as a **claim** (not just keywords)
+- Extracts entities: NASA (organization), Mars (location)
+- Converts questions to statements for better matching
+
+### Step 2: Embedding Generation
+The claim is converted to a **384-dimensional vector** using the `all-MiniLM-L6-v2` sentence transformer model. This captures the *meaning* of the claim.
+
+### Step 3: Semantic Matching
+Articles from NewsAPI are also converted to embeddings, then compared using **cosine similarity**:
+- Articles with similarity > 50% are marked as highly relevant
+- Articles with similarity 30-50% are included but flagged
+- Articles below 30% are filtered out
+
+### Step 4: Stance Detection
+For each relevant article, the system determines:
+- **Supporting** ✓ - Article confirms the claim
+- **Contradicting** ✗ - Article refutes the claim
+- **Neutral** - Article mentions topic but doesn't take a stance
+
+### Example
+```
+Input: "Did NASA find water on the Moon?"
+
+→ Converted to claim: "NASA found water on the Moon"
+→ Entities: NASA (org), Moon (location)
+→ Searches for semantically similar articles
+→ Finds: "NASA confirms water ice at lunar poles" (similarity: 0.72, supporting)
+→ Verdict: LIKELY TRUE (3 supporting sources)
+```
 
 ## 🚀 Quick Start
 
@@ -91,26 +129,59 @@ Our LSTM model:
 3. **Learns temporal patterns** - Trained to recognize authentic vs. suspicious evolution patterns
 4. **Uses attention** - Focuses on the most important time points for making predictions
 
-### What the Model Analyzes
-For each article in the timeline, the system extracts:
-- **Sentiment score** (-1 to +1): Emotional tone of the language
-- **Certainty level** (0 to 1): How definitive the claims are
-- **Urgency indicators**: Breaking news language, alerts
-- **Source credibility**: Reputation of the news outlet
+## 🔬 Credibility Analysis Features
 
-The LSTM then analyzes how these features change across the timeline to produce a credibility score.
+The system analyzes **11 key features** to calculate credibility:
+
+| Feature | What It Detects | Weight |
+|---------|-----------------|--------|
+| **Source Count** | Number of independent sources reporting | 30% |
+| **Publisher Credibility** | Reputation of news outlets (BBC, Reuters vs unknown) | 30% |
+| **Clickbait Score** | Misleading headlines ("You won't believe...") | 25% |
+| **Sentiment Intensity** | Emotionally charged/exaggerated language | 25% |
+| **Lexical Complexity** | Vocabulary richness (fake news often simpler) | 25% |
+| **Stance Similarity** | Agreement between different sources | 20% |
+| **Narrative Drift** | Facts changing over time ("5 dead" → "50 dead") | 20% |
+| **Time Gap Analysis** | Spread pattern (real news spreads gradually) | 15% |
+| **Correction Detection** | Updates/corrections (sign of responsible journalism) | 15% |
+| **Source Redundancy** | Whether articles are from same wire service | 10% |
+| **Entity Consistency** | Cross-checking names, dates, locations | 10% |
+
+### How Credibility Score is Calculated
+
+```
+Final Score = (0.30 × Source Quality) +
+              (0.25 × Content Quality) +
+              (0.20 × Consistency) +
+              (0.15 × Temporal Patterns) +
+              (0.10 × Source Independence)
+
+Bonuses: +0.10 for 3+ high-credibility sources
+Penalties: -0.15 for single source, -0.10 for high clickbait
+```
+
+### Verdict Thresholds
+
+| Score | Verdict |
+|-------|---------|
+| ≥ 0.70 | LIKELY REAL |
+| 0.50 - 0.69 | PROBABLY REAL |
+| 0.35 - 0.49 | UNCERTAIN |
+| 0.20 - 0.34 | PROBABLY FAKE |
+| < 0.20 | LIKELY FAKE |
 
 ## 📁 Project Structure
 
 ```
-├── app.py                 # Main Flask app with NewsAPI integration
+├── app.py                 # Main Flask app with NewsAPI + Semantic Search
 ├── src/
-│   ├── main.py           # Core detection system
+│   ├── main.py           # Core detection system with credibility scoring
 │   ├── rnn_model.py      # LSTM model for temporal analysis
-│   ├── text_analyzer.py  # Sentiment & certainty analysis
+│   ├── text_analyzer.py  # 11-feature analysis (clickbait, sentiment, etc.)
+│   ├── semantic_search.py # Sentence embeddings & claim verification
 │   └── data_collector.py # Base data collection utilities
 ├── templates/
-│   └── index.html        # Web interface
+│   └── index.html        # Web interface with semantic similarity display
 ├── train_model.py        # Model training script
 ├── test_web_api.py       # API testing script
 ├── trained_model.pth     # Pre-trained model weights
